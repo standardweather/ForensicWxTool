@@ -65,3 +65,44 @@ export function formatUtc(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toISOString().replace(".000Z", "Z");
 }
+
+
+/** Initial bearing from point 1 to point 2, degrees clockwise from north (0–360). */
+export function bearingDegrees(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δλ = toRad(lon2 - lon1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+const CARDINALS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+
+export function bearingCardinal(deg: number): string {
+  const i = Math.round((((deg % 360) + 360) % 360) / 22.5) % 16;
+  return CARDINALS[i]!;
+}
+
+/** Human-readable distance + bearing from a point of interest to a report. */
+export function formatOffsetFromPoi(
+  poiLat: number,
+  poiLon: number,
+  lat: number,
+  lon: number
+): string {
+  const km = distanceKm(poiLat, poiLon, lat, lon);
+  const mi = km * 0.621371;
+  const brg = bearingDegrees(poiLat, poiLon, lat, lon);
+  const card = bearingCardinal(brg);
+  return `${km.toFixed(1)} km (${mi.toFixed(1)} mi) · ${card} (${Math.round(brg)}°)`;
+}

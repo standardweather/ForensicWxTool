@@ -11,6 +11,24 @@ function parseNum(v: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function parseReportType(
+  metar: string | null
+): MetarObs["reportType"] {
+  if (!metar) return "unknown";
+  if (/\bSPECI\b/i.test(metar)) return "SPECI";
+  if (/\bMETAR\b/i.test(metar)) return "METAR";
+  return "unknown";
+}
+
+function parseValidMs(v: string): number {
+  if (!v) return NaN;
+  if (v.includes("T")) {
+    return new Date(v.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(v) ? v : `${v}Z`).getTime();
+  }
+  // IEM ASOS CSV: "YYYY-MM-DD HH:MM" (UTC)
+  return new Date(`${v.replace(" ", "T")}Z`).getTime();
+}
+
 export async function GET(req: NextRequest) {
   const lat = Number(req.nextUrl.searchParams.get("lat"));
   const lon = Number(req.nextUrl.searchParams.get("lon"));
@@ -28,22 +46,26 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "invalid time" }, { status: 400 });
   }
 
-  const sts = new Date(center.getTime() - 45 * 60_000).toISOString();
-  const ets = new Date(center.getTime() + 45 * 60_000).toISOString();
+  // Wide window so radar scrubbing can pick nearest obs per frame
+  const windowMin = 120;
+  const sts = new Date(center.getTime() - windowMin * 60_000).toISOString();
+  const ets = new Date(center.getTime() + windowMin * 60_000).toISOString();
 
   try {
     const stations = await fetchNearbyAsosStations(lat, lon);
     if (!stations.length) {
       return NextResponse.json({
         observations: [],
+        count: 0,
         note: "No nearby ASOS stations resolved from IEM networks.",
+        source: "IEM ASOS/METAR archive",
       });
     }
 
     const observations: MetarObs[] = [];
 
     await Promise.all(
-      stations.slice(0, 6).map(async (st) => {
+      stations.slice(0, 12).map(async (st) => {
         const url = iemAsosUrl({ station: st.id, sts, ets });
         const res = await fetch(url, {
           headers: { Accept: "text/plain" },
@@ -70,6 +92,8 @@ export async function GET(req: NextRequest) {
           });
           const obsLat = parseNum(row.lat) ?? st.lat;
           const obsLon = parseNum(row.lon) ?? st.lon;
+          const metar =
+            row.metar && row.metar !== "M" ? row.metar : null;
           observations.push({
             station: row.station || st.id,
             valid: row.valid,
@@ -82,38 +106,28 @@ export async function GET(req: NextRequest) {
             drct: parseNum(row.drct),
             vsby: parseNum(row.vsby),
             wxcodes: row.wxcodes && row.wxcodes !== "M" ? row.wxcodes : null,
-            metar: row.metar && row.metar !== "M" ? row.metar : null,
+            metar,
             distanceKm:
               Math.round(distanceKm(lat, lon, obsLat, obsLon) * 10) / 10,
+            reportType: parseReportType(metar),
           });
         }
       })
     );
 
-    // Keep closest observation per station to event time
-    const byStation = new Map<string, MetarObs>();
-    for (const o of observations) {
-      const prev = byStation.get(o.station);
-      if (!prev) {
-        byStation.set(o.station, o);
-        continue;
-      }
-      const t0 = center.getTime();
-      const parseValid = (v: string) =>
-        new Date(v.includes("T") ? v : v.replace(" ", "T") + "Z").getTime();
-      const dNew = Math.abs(parseValid(o.valid) - t0);
-      const dOld = Math.abs(parseValid(prev.valid) - t0);
-      if (dNew < dOld) byStation.set(o.station, o);
-    }
-
-    const nearest = [...byStation.values()].sort(
-      (a, b) => a.distanceKm - b.distanceKm
-    );
+    // Return full series (all obs in window) for client-side time matching
+    observations.sort((a, b) => {
+      if (a.distanceKm !== b.distanceKm) return a.distanceKm - b.distanceKm;
+      const ta = parseValidMs(a.valid);
+      const tb = parseValidMs(b.valid);
+      return (Number.isFinite(ta) ? ta : 0) - (Number.isFinite(tb) ? tb : 0);
+    });
 
     return NextResponse.json({
-      observations: nearest,
-      count: nearest.length,
+      observations,
+      count: observations.length,
       source: "IEM ASOS/METAR archive",
+      windowMin,
     });
   } catch (e) {
     return NextResponse.json(

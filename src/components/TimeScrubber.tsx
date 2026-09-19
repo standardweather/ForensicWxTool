@@ -8,6 +8,7 @@ type Props = {
   onChange: (index: number) => void;
   playing: boolean;
   onTogglePlay: () => void;
+  emptyMessage?: string | null;
 };
 
 export default function TimeScrubber({
@@ -16,11 +17,13 @@ export default function TimeScrubber({
   onChange,
   playing,
   onTogglePlay,
+  emptyMessage,
 }: Props) {
   if (!scans.length) {
     return (
       <div className="rounded-lg border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-xs text-slate-400">
-        No radar frames for this window — try another product/site or widen time.
+        {emptyMessage?.trim() ||
+          "No imagery frames for this window — try another source/product or a later event."}
       </div>
     );
   }

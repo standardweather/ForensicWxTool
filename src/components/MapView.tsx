@@ -12,6 +12,7 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LayerVisibility, MetarObs, SpcReport } from "@/lib/types";
+import { formatOffsetFromPoi } from "@/lib/geo";
 
 type Props = {
   lat: number;
@@ -19,6 +20,7 @@ type Props = {
   onMapClick: (lat: number, lon: number) => void;
   layers: LayerVisibility;
   radar?: {
+    source: "ridge" | "mrms" | "goes";
     radar: string;
     product: string;
     layerId: string | null;
@@ -105,7 +107,12 @@ function row(label: string, value: unknown): string {
   return `<div style="margin:2px 0"><span style="color:#94a3b8">${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>`;
 }
 
-function spcPopupHtml(r: SpcReport): string {
+function poiOffsetRow(poiLat: number, poiLon: number, lat: number, lon: number): string {
+  if (![poiLat, poiLon, lat, lon].every(Number.isFinite)) return "";
+  return row("From POI", formatOffsetFromPoi(poiLat, poiLon, lat, lon));
+}
+
+function spcPopupHtml(r: SpcReport, poiLat: number, poiLon: number): string {
   return `<div style="${POPUP_STYLE}">
     <div style="font-weight:600;margin-bottom:6px;color:#38bdf8">SPC ${escapeHtml(r.type)}</div>
     ${row("Time (UTC)", r.timeUtc)}
@@ -114,11 +121,17 @@ function spcPopupHtml(r: SpcReport): string {
     ${row("State", r.state)}
     ${row("Magnitude", r.magnitude)}
     ${row("Comments", r.comments)}
-    ${row("Distance (km)", r.distanceKm != null ? r.distanceKm.toFixed(1) : null)}
+    ${poiOffsetRow(poiLat, poiLon, r.lat, r.lon)}
   </div>`;
 }
 
-function lsrPopupHtml(props: Record<string, unknown>): string {
+function lsrPopupHtml(
+  props: Record<string, unknown>,
+  lat: number,
+  lon: number,
+  poiLat: number,
+  poiLon: number
+): string {
   return `<div style="${POPUP_STYLE}">
     <div style="font-weight:600;margin-bottom:6px;color:#f59e0b">LSR ${escapeHtml(props.typetext ?? props.type)}</div>
     ${row("Type", props.typetext ?? props.type)}
@@ -128,24 +141,133 @@ function lsrPopupHtml(props: Record<string, unknown>): string {
     ${row("Valid", props.valid)}
     ${row("Magnitude", props.magnitude)}
     ${row("Remark", props.remark)}
+    ${poiOffsetRow(poiLat, poiLon, lat, lon)}
   </div>`;
 }
 
-function metarPopupHtml(obs: MetarObs): string {
+function metarPopupHtml(obs: MetarObs, poiLat: number, poiLon: number): string {
   const windParts: string[] = [];
   if (obs.drct != null) windParts.push(`${obs.drct}°`);
   if (obs.sknt != null) windParts.push(`${obs.sknt} kt`);
-  if (obs.gust != null) windParts.push(`G${obs.gust}`);
+  if (obs.gust != null && (obs.sknt == null || obs.gust > obs.sknt)) {
+    windParts.push(`G${obs.gust}`);
+  }
+  const kind =
+    obs.reportType && obs.reportType !== "unknown"
+      ? obs.reportType
+      : "METAR";
   return `<div style="${POPUP_STYLE}">
-    <div style="font-weight:600;margin-bottom:6px;color:#a78bfa">METAR ${escapeHtml(obs.station)}</div>
+    <div style="font-weight:600;margin-bottom:6px;color:#a78bfa">${escapeHtml(kind)} ${escapeHtml(obs.station)}</div>
     ${row("Valid", obs.valid)}
     ${row("Temp (°F)", obs.tmpf != null ? Math.round(obs.tmpf) : null)}
     ${row("Dewpoint (°F)", obs.dwpf != null ? Math.round(obs.dwpf) : null)}
     ${row("Wind", windParts.length ? windParts.join(" ") : null)}
     ${row("Visibility", obs.vsby != null ? `${obs.vsby} mi` : null)}
     ${row("Wx", obs.wxcodes)}
+    ${poiOffsetRow(poiLat, poiLon, obs.lat, obs.lon)}
     ${obs.metar ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #334155;font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;color:#cbd5e1">${escapeHtml(obs.metar)}</div>` : ""}
   </div>`;
+}
+
+/**
+ * Meteorological wind barb SVG (staff points toward wind-from direction).
+ * Speed: pennant=50 kt, full barb=10, half=5; calm (<2.5 kt) = circle.
+ */
+function windBarbInnerSvg(drct: number, sknt: number): string {
+  const stroke = "#c4b5fd";
+  if (sknt < 2.5) {
+    return `<svg width="36" height="36" viewBox="-18 -18 36 36" aria-hidden="true">
+      <circle cx="0" cy="0" r="5" fill="none" stroke="${stroke}" stroke-width="1.6"/>
+      <circle cx="0" cy="0" r="1.5" fill="${stroke}"/>
+    </svg>`;
+  }
+
+  let speed = Math.round(sknt / 5) * 5;
+  if (speed < 5) speed = 5;
+
+  const pennants = Math.floor(speed / 50);
+  speed %= 50;
+  const full = Math.floor(speed / 10);
+  speed %= 10;
+  const half = speed >= 5 ? 1 : 0;
+
+  const parts: string[] = [];
+  // Staff: origin → north tip (0,-18); rotate(drct) aims tip into the wind
+  parts.push(
+    `<line x1="0" y1="4" x2="0" y2="-18" stroke="${stroke}" stroke-width="1.6" stroke-linecap="round"/>`
+  );
+
+  let y = -18;
+  for (let i = 0; i < pennants; i++) {
+    parts.push(
+      `<polygon points="0,${y} -11,${y + 3.5} 0,${y + 7}" fill="${stroke}"/>`
+    );
+    y += 8;
+  }
+  for (let i = 0; i < full; i++) {
+    parts.push(
+      `<line x1="0" y1="${y}" x2="-11" y2="${y - 4}" stroke="${stroke}" stroke-width="1.5" stroke-linecap="round"/>`
+    );
+    y += 4.2;
+  }
+  if (half) {
+    // Lone half-barb sits slightly down-staff (WMO-ish)
+    if (pennants === 0 && full === 0) y = -12;
+    parts.push(
+      `<line x1="0" y1="${y}" x2="-6" y2="${y - 2.2}" stroke="${stroke}" stroke-width="1.5" stroke-linecap="round"/>`
+    );
+  }
+
+  return `<svg width="36" height="36" viewBox="-18 -18 36 36" aria-hidden="true">
+    <g transform="rotate(${drct})">${parts.join("")}</g>
+  </svg>`;
+}
+
+function makeMetarMarkerEl(obs: MetarObs): HTMLDivElement {
+  const el = document.createElement("div");
+  el.style.display = "flex";
+  el.style.flexDirection = "column";
+  el.style.alignItems = "center";
+  el.style.cursor = "pointer";
+  el.style.pointerEvents = "auto";
+  el.style.lineHeight = "1.05";
+  el.style.userSelect = "none";
+
+  const hasWind =
+    obs.drct != null &&
+    Number.isFinite(obs.drct) &&
+    obs.sknt != null &&
+    Number.isFinite(obs.sknt);
+
+  const sknt = obs.sknt ?? 0;
+  const gust = obs.gust;
+  const speedLabel =
+    gust != null && Number.isFinite(gust) && gust > sknt
+      ? `${Math.round(sknt)}G${Math.round(gust)}`
+      : hasWind
+        ? `${Math.round(sknt)}`
+        : "";
+
+  if (hasWind) {
+    el.innerHTML = `${windBarbInnerSvg(obs.drct as number, sknt)}
+      <span style="font:9px/1.1 ui-monospace,monospace;color:#e9d5ff;text-shadow:0 1px 2px #0f172a,0 0 4px #0f172a;margin-top:-2px">${escapeHtml(obs.station)}</span>
+      <span style="font:8px/1.1 ui-monospace,monospace;color:#c4b5fd;text-shadow:0 1px 2px #0f172a">${escapeHtml(speedLabel)}</span>`;
+  } else {
+    const dot = makeDotEl(
+      "#a78bfa",
+      11,
+      `${obs.station}${obs.tmpf != null ? ` ${Math.round(obs.tmpf)}°F` : ""}`
+    );
+    el.appendChild(dot);
+    const lab = document.createElement("span");
+    lab.style.cssText =
+      "font:9px/1.1 ui-monospace,monospace;color:#e9d5ff;text-shadow:0 1px 2px #0f172a;margin-top:2px";
+    lab.textContent = obs.station;
+    el.appendChild(lab);
+  }
+
+  el.title = `${obs.station} ${obs.valid}${speedLabel ? ` ${speedLabel}kt` : ""}`;
+  return el;
 }
 
 function makeDotEl(color: string, sizePx: number, title?: string): HTMLDivElement {
@@ -209,6 +331,8 @@ export default function MapView({
   onClickRef.current = onMapClick;
 
   const propsRef = useRef({
+    lat,
+    lon,
     layers,
     radar,
     warningsGeoJson,
@@ -217,6 +341,8 @@ export default function MapView({
     metars,
   });
   propsRef.current = {
+    lat,
+    lon,
     layers,
     radar,
     warningsGeoJson,
@@ -350,7 +476,8 @@ export default function MapView({
         const el = makeDotEl(color, 12, title);
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
-          openPopup(map, [r.lon, r.lat], spcPopupHtml(r));
+          const { lat: poiLat, lon: poiLon } = propsRef.current;
+          openPopup(map, [r.lon, r.lat], spcPopupHtml(r, poiLat, poiLon));
         });
         const m = new Marker({ element: el }).setLngLat([r.lon, r.lat]).addTo(map);
         overlayMarkersRef.current.push(m);
@@ -379,7 +506,8 @@ export default function MapView({
         const latPtFinal = latPt;
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
-          openPopup(map, [lng, latPtFinal], lsrPopupHtml(props));
+          const { lat: poiLat, lon: poiLon } = propsRef.current;
+          openPopup(map, [lng, latPtFinal], lsrPopupHtml(props, latPtFinal, lng, poiLat, poiLon));
         });
         const m = new Marker({ element: el }).setLngLat([lonPt, latPt]).addTo(map);
         overlayMarkersRef.current.push(m);
@@ -389,13 +517,15 @@ export default function MapView({
     if (L.metar) {
       for (const obs of metarList) {
         if (!Number.isFinite(obs.lat) || !Number.isFinite(obs.lon)) continue;
-        const label = `${obs.station}${obs.tmpf != null ? ` ${Math.round(obs.tmpf)}°F` : ""}`;
-        const el = makeDotEl("#a78bfa", 11, label);
+        const el = makeMetarMarkerEl(obs);
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
-          openPopup(map, [obs.lon, obs.lat], metarPopupHtml(obs));
+          const { lat: poiLat, lon: poiLon } = propsRef.current;
+          openPopup(map, [obs.lon, obs.lat], metarPopupHtml(obs, poiLat, poiLon));
         });
-        const m = new Marker({ element: el }).setLngLat([obs.lon, obs.lat]).addTo(map);
+        const m = new Marker({ element: el, anchor: "center" })
+          .setLngLat([obs.lon, obs.lat])
+          .addTo(map);
         overlayMarkersRef.current.push(m);
       }
     }
@@ -408,15 +538,23 @@ export default function MapView({
     if (map.getSource("radar")) map.removeSource("radar");
 
     if (radarVisible && R && layerId) {
+      const src = R.source ?? "ridge";
       const tiles = [
-        `/api/radar/tile?radar=${encodeURIComponent(R.radar)}&product=${encodeURIComponent(R.product)}&time=${encodeURIComponent(layerId)}&z={z}&x={x}&y={y}`,
+        `/api/radar/tile?source=${encodeURIComponent(src)}&radar=${encodeURIComponent(R.radar)}&product=${encodeURIComponent(R.product)}&time=${encodeURIComponent(layerId)}&z={z}&x={x}&y={y}`,
       ];
+
+      const attribution =
+        src === "mrms"
+          ? "IEM MRMS archive"
+          : src === "goes"
+            ? "IEM GOES East CONUS (realtime)"
+            : "IEM NEXRAD ridge archive";
 
       map.addSource("radar", {
         type: "raster",
         tiles,
         tileSize: 256,
-        attribution: "IEM NEXRAD/MRMS ridge archive",
+        attribution,
       });
 
       map.addLayer({

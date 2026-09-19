@@ -96,7 +96,10 @@ export default function ReportList({
               >
                 <div className="text-xs text-violet-100">
                   {m.station} · {m.tmpf != null ? `${Math.round(m.tmpf)}°F` : "—"}
-                  {m.sknt != null ? ` · ${m.sknt} kt` : ""}
+                  {m.sknt != null
+                    ? ` · ${m.sknt}${m.gust != null && m.gust > m.sknt ? `G${m.gust}` : ""} kt`
+                    : ""}
+                  {m.drct != null ? ` @ ${m.drct}°` : ""}
                   {m.wxcodes ? ` · ${m.wxcodes}` : ""}
                 </div>
                 <div className="font-mono text-[10px] text-slate-500">

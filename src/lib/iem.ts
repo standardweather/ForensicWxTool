@@ -181,13 +181,50 @@ export async function fetchNearbyAsosStations(
   const { distanceKm } = await import("./geo");
   return stations
     .map((s) => ({ ...s, d: distanceKm(lat, lon, s.lat, s.lon) }))
-    .filter((s) => s.d <= 150)
+    .filter((s) => s.d <= 200)
     .sort((a, b) => a.d - b.d)
-    .slice(0, 8)
+    .slice(0, 12)
     .map(({ id, name, lat: la, lon: lo }) => ({
       id,
       name,
       lat: la,
       lon: lo,
     }));
+}
+
+/** IEM MRMS archived TMS — must use /cache/tile.py (not /c/). */
+export function iemMrmsTileUrl(
+  product: string,
+  layerTime: string,
+  z: number,
+  x: number,
+  y: number
+): string {
+  return `${IEM_BASE}/cache/tile.py/1.0.0/mrms::${product}-${layerTime}/${z}/${x}/${y}.png`;
+}
+
+/**
+ * Realtime GOES East CONUS channel tiles via /cache/tile.py.
+ * IEM OGC docs list no timestamped archive pattern for these layers;
+ * timestamped guesses return identical placeholder PNGs.
+ */
+export function iemGoesRealtimeTileUrl(
+  channel: string,
+  z: number,
+  x: number,
+  y: number,
+  bird: "east" | "west" = "east",
+  sector: string = "conus"
+): string {
+  const ch = channel.replace(/^ch/i, "").padStart(2, "0");
+  return `${IEM_BASE}/cache/tile.py/1.0.0/goes_${bird}_${sector}_ch${ch}/${z}/${x}/${y}.png`;
+}
+
+export function goesLayerName(
+  channel: string,
+  bird: "east" | "west" = "east",
+  sector: string = "conus"
+): string {
+  const ch = channel.replace(/^ch/i, "").padStart(2, "0");
+  return `goes_${bird}_${sector}_ch${ch}`;
 }
